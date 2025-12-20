@@ -5,7 +5,7 @@ ARG TYPST_VERSION=0.14.2
 WORKDIR /app
 
 RUN apt-get update \
-	&& apt-get install -y --no-install-recommends ca-certificates curl xz-utils \
+	&& apt-get install -y --no-install-recommends ca-certificates curl xz-utils fontconfig fonts-noto-cjk \
 	&& rm -rf /var/lib/apt/lists/*
 
 # Install Typst CLI

@@ -3,6 +3,26 @@ $ErrorActionPreference = 'Stop'
 # Always run from this script's directory
 Set-Location -Path $PSScriptRoot
 
+function Resolve-VenvExePath {
+  param(
+    [Parameter(Mandatory=$true)][string]$VenvDir,
+    [Parameter(Mandatory=$true)][string]$ExeName
+  )
+
+  $candidates = @(
+    (Join-Path $VenvDir (Join-Path 'Scripts' $ExeName)),
+    (Join-Path $VenvDir (Join-Path 'bin' $ExeName)),
+    (Join-Path $VenvDir (Join-Path 'Scripts' ($ExeName + '.exe'))),
+    (Join-Path $VenvDir (Join-Path 'bin' ($ExeName + '.exe')))
+  )
+
+  foreach ($p in $candidates) {
+    if (Test-Path $p) { return $p }
+  }
+
+  return $null
+}
+
 # Refresh PATH (helps the backend find newly-installed tools like typst)
 $env:Path = [System.Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [System.Environment]::GetEnvironmentVariable('Path','User')
 
@@ -29,10 +49,30 @@ if (-not $env:TYPST_BIN) {
   }
 }
 
-$python = Join-Path $PSScriptRoot '.venv\Scripts\python.exe'
-if (-not (Test-Path $python)) {
-  Write-Host "[ERROR] Cannot find venv python: $python" -ForegroundColor Red
-  Write-Host "Create it first:" -ForegroundColor Yellow
+$repoRoot = Split-Path -Parent $PSScriptRoot
+
+$venvCandidates = @(
+  (Join-Path $PSScriptRoot '.venv'),
+  (Join-Path $repoRoot '.venv')
+)
+
+$python = $null
+$pip = $null
+foreach ($venvDir in $venvCandidates) {
+  $py = Resolve-VenvExePath -VenvDir $venvDir -ExeName 'python'
+  $pp = Resolve-VenvExePath -VenvDir $venvDir -ExeName 'pip'
+  if ($py -and $pp) {
+    $python = $py
+    $pip = $pp
+    break
+  }
+}
+
+if (-not $python) {
+  $expected1 = Join-Path $PSScriptRoot '.venv'
+  $expected2 = Join-Path $repoRoot '.venv'
+  Write-Host "[ERROR] Cannot find venv python in: $expected1 or $expected2" -ForegroundColor Red
+  Write-Host "Create it first (recommended under LabFlow_backend):" -ForegroundColor Yellow
   Write-Host "  python -m venv .venv" -ForegroundColor Yellow
   Write-Host "  .\\.venv\\Scripts\\Activate.ps1" -ForegroundColor Yellow
   Write-Host "  pip install -r requirements.txt" -ForegroundColor Yellow
@@ -40,7 +80,6 @@ if (-not (Test-Path $python)) {
 }
 
 # Check and install missing dependencies
-$pip = Join-Path $PSScriptRoot '.venv\Scripts\pip.exe'
 $requirementsFile = Join-Path $PSScriptRoot 'requirements.txt'
 
 Write-Host "Checking dependencies..." -ForegroundColor Cyan

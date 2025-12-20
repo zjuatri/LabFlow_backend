@@ -40,3 +40,13 @@ class ProjectResponse(BaseModel):
 
 class TypstRenderRequest(BaseModel):
     code: str
+
+
+class ChartRenderRequest(BaseModel):
+    chart_type: str
+    title: str = ''
+    x_label: str = ''
+    y_label: str = ''
+    legend: bool = True
+    data: list[dict] = []
+

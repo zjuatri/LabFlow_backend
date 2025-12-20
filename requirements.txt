@@ -10,3 +10,4 @@ PyMySQL
 Pillow
 python-multipart
 cryptography
+matplotlib

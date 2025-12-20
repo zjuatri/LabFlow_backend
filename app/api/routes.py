@@ -26,6 +26,7 @@ from ..schemas import (
     RegisterRequest,
     TokenResponse,
     TypstRenderRequest,
+    ChartRenderRequest,
 )
 from ..security import create_access_token, get_current_user, hash_password, verify_password
 
@@ -41,6 +42,9 @@ def _project_storage_dir(project_id: str) -> Path:
 
 def _project_images_dir(project_id: str) -> Path:
     return _project_storage_dir(project_id) / "images"
+
+def _project_charts_dir(project_id: str) -> Path:
+    return _project_storage_dir(project_id) / "charts"
 
 def _extract_image_paths(code: str) -> set[str]:
     """Extract image file paths from Typst code.
@@ -371,3 +375,260 @@ def upload_image(
 
     url = f"/static/projects/{project_id}/images/{target_name}"
     return {"url": url}
+
+
+@router.post("/projects/{project_id}/charts/render")
+def render_chart(
+    project_id: str,
+    payload: ChartRenderRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Render a chart using matplotlib and store it under /static/projects/<id>/charts."""
+    project = db.get(Project, project_id)
+    if project is None or project.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Import here to avoid importing matplotlib at module import time (faster startup)
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib import font_manager
+
+    chart_type = (payload.chart_type or "").strip().lower()
+    if chart_type not in {"scatter", "bar", "pie", "hbar"}:
+        raise HTTPException(status_code=400, detail="Unsupported chart type")
+
+    data = payload.data or []
+    if not isinstance(data, list):
+        raise HTTPException(status_code=400, detail="Invalid data")
+
+    # Font setup (Chinese support). We try multiple common fonts and fall back gracefully.
+    # This runs per request; cheap enough for typical usage.
+    try:
+        preferred_fonts = [
+            # Windows
+            "Microsoft YaHei",
+            "SimHei",
+            # Linux common
+            "Noto Sans CJK SC",
+            "Noto Sans CJK",
+            "WenQuanYi Micro Hei",
+            "AR PL UMing CN",
+        ]
+        installed = {f.name for f in font_manager.fontManager.ttflist}
+        candidates = [name for name in preferred_fonts if name in installed]
+        # Keep matplotlib default fallbacks too.
+        if candidates:
+            matplotlib.rcParams["font.family"] = "sans-serif"
+            matplotlib.rcParams["font.sans-serif"] = candidates + ["DejaVu Sans"]
+        matplotlib.rcParams["axes.unicode_minus"] = False
+    except Exception:
+        # Never fail chart rendering due to font detection.
+        pass
+
+    fig, ax = plt.subplots(figsize=(6, 4), dpi=150)
+
+    try:
+        if chart_type == "scatter":
+            # data: [{x,y,series?}]
+            # x can be numeric OR categorical (string). If any non-numeric x exists,
+            # we treat x as categorical for all points.
+            raw_points: list[tuple[str, object, float]] = []  # (series, x_raw, y)
+            any_non_numeric_x = False
+            for row in data:
+                if not isinstance(row, dict):
+                    continue
+                x = row.get("x")
+                y = row.get("y")
+                try:
+                    yf = float(y)
+                except Exception:
+                    continue
+                # Detect whether x is numeric.
+                xf: float | None = None
+                try:
+                    xf = float(x)
+                    # Avoid treating empty/None as 0.
+                    if x is None or (isinstance(x, str) and not x.strip()):
+                        xf = None
+                except Exception:
+                    xf = None
+
+                s = str(row.get("series") or "")
+                if xf is None:
+                    any_non_numeric_x = True
+                raw_points.append((s, x, yf))
+
+            if not raw_points:
+                raise HTTPException(status_code=400, detail="No valid scatter points")
+
+            if any_non_numeric_x:
+                # Categorical x: map labels to positions.
+                x_order: list[str] = []
+                x_index: dict[str, int] = {}
+                points_by_series: dict[str, list[tuple[int, float]]] = {}
+                for s, x_raw, yf in raw_points:
+                    x_label = str(x_raw).strip()
+                    if not x_label:
+                        continue
+                    if x_label not in x_index:
+                        x_index[x_label] = len(x_order)
+                        x_order.append(x_label)
+                    points_by_series.setdefault(s, []).append((x_index[x_label], yf))
+
+                if not points_by_series:
+                    raise HTTPException(status_code=400, detail="No valid scatter points")
+
+                for s, pts in points_by_series.items():
+                    xs = [p[0] for p in pts]
+                    ys = [p[1] for p in pts]
+                    label = s if s else None
+                    ax.scatter(xs, ys, s=18, label=label)
+
+                ax.set_xticks(list(range(len(x_order))))
+                ax.set_xticklabels(x_order, rotation=30, ha="right")
+            else:
+                # Numeric x.
+                series_map: dict[str, list[tuple[float, float]]] = {}
+                for s, x_raw, yf in raw_points:
+                    try:
+                        xf = float(x_raw)
+                    except Exception:
+                        continue
+                    series_map.setdefault(s, []).append((xf, yf))
+
+                if not series_map:
+                    raise HTTPException(status_code=400, detail="No valid scatter points")
+
+                for s, pts in series_map.items():
+                    xs = [p[0] for p in pts]
+                    ys = [p[1] for p in pts]
+                    label = s if s else None
+                    ax.scatter(xs, ys, s=18, label=label)
+
+            ax.set_xlabel(payload.x_label or "")
+            ax.set_ylabel(payload.y_label or "")
+            if payload.title:
+                ax.set_title(payload.title)
+            if payload.legend:
+                # show legend only if there is at least one non-empty series label
+                try:
+                    handles, labels = ax.get_legend_handles_labels()
+                    if any(l for l in labels):
+                        ax.legend(loc="best")
+                except Exception:
+                    pass
+
+        elif chart_type in {"bar", "hbar"}:
+            # data: [{label,value,series?}]
+            # group by series for grouped bars
+            series_map: dict[str, dict[str, float]] = {}
+            labels_order: list[str] = []
+
+            for row in data:
+                if not isinstance(row, dict):
+                    continue
+                label = str(row.get("label") or row.get("x") or row.get("name") or "").strip()
+                if not label:
+                    continue
+                try:
+                    val = float(row.get("value") if row.get("value") is not None else row.get("y"))
+                except Exception:
+                    continue
+                s = str(row.get("series") or "")
+                series_map.setdefault(s, {})[label] = val
+                if label not in labels_order:
+                    labels_order.append(label)
+
+            if not labels_order:
+                raise HTTPException(status_code=400, detail="No valid bar data")
+
+            series_keys = list(series_map.keys())
+            if len(series_keys) == 1:
+                vals = [series_map[series_keys[0]].get(l, 0.0) for l in labels_order]
+                if chart_type == "bar":
+                    ax.bar(labels_order, vals)
+                    ax.set_xlabel(payload.x_label or "")
+                    ax.set_ylabel(payload.y_label or "")
+                else:
+                    ax.barh(labels_order, vals)
+                    ax.set_xlabel(payload.x_label or "")
+                    ax.set_ylabel(payload.y_label or "")
+            else:
+                x = list(range(len(labels_order)))
+                width = 0.8 / max(1, len(series_keys))
+                for idx, s in enumerate(series_keys):
+                    vals = [series_map[s].get(l, 0.0) for l in labels_order]
+                    label = s if s else f"series{idx+1}"
+                    if chart_type == "bar":
+                        xs = [xi + idx * width for xi in x]
+                        ax.bar(xs, vals, width=width, label=label)
+                    else:
+                        ys = [yi + idx * width for yi in x]
+                        ax.barh(ys, vals, height=width, label=label)
+
+                if chart_type == "bar":
+                    ax.set_xticks([xi + (len(series_keys) - 1) * width / 2 for xi in x])
+                    ax.set_xticklabels(labels_order)
+                    ax.set_xlabel(payload.x_label or "")
+                    ax.set_ylabel(payload.y_label or "")
+                else:
+                    ax.set_yticks([yi + (len(series_keys) - 1) * width / 2 for yi in x])
+                    ax.set_yticklabels(labels_order)
+                    ax.set_xlabel(payload.x_label or "")
+                    ax.set_ylabel(payload.y_label or "")
+
+                if payload.legend:
+                    ax.legend(loc="best")
+
+            if payload.title:
+                ax.set_title(payload.title)
+            fig.tight_layout()
+
+        elif chart_type == "pie":
+            # data: [{label,value}] (if series present, use first series)
+            series_map: dict[str, list[tuple[str, float]]] = {}
+            for row in data:
+                if not isinstance(row, dict):
+                    continue
+                label = str(row.get("label") or row.get("name") or row.get("x") or "").strip()
+                if not label:
+                    continue
+                try:
+                    val = float(row.get("value") if row.get("value") is not None else row.get("y"))
+                except Exception:
+                    continue
+                s = str(row.get("series") or "")
+                series_map.setdefault(s, []).append((label, val))
+
+            if not series_map:
+                raise HTTPException(status_code=400, detail="No valid pie data")
+
+            # Choose a series deterministically: prefer empty series else first
+            chosen_key = "" if "" in series_map else sorted(series_map.keys())[0]
+            items = series_map[chosen_key]
+            labels = [x[0] for x in items]
+            vals = [x[1] for x in items]
+
+            if payload.legend:
+                wedges, _ = ax.pie(vals)
+                ax.legend(wedges, labels, loc="center left", bbox_to_anchor=(1.0, 0.5))
+            else:
+                ax.pie(vals, labels=labels)
+
+            if payload.title:
+                ax.set_title(payload.title)
+            ax.axis("equal")
+
+        # Save
+        charts_dir = _project_charts_dir(project_id)
+        charts_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
+        filename = f"chart-{ts}.png"
+        target_path = charts_dir / filename
+        fig.savefig(target_path, format="png", bbox_inches="tight")
+        url = f"/static/projects/{project_id}/charts/{filename}"
+        return {"url": url}
+    finally:
+        plt.close(fig)
