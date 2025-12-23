@@ -10,8 +10,9 @@ load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env")
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from apscheduler.schedulers.background import BackgroundScheduler
 
-from .api.routes import router
+from .api.routes import router, cleanup_all_unreferenced_images
 from .db import Base, engine
 
 app = FastAPI(title="LabFlow Backend")
@@ -20,6 +21,14 @@ app = FastAPI(title="LabFlow Backend")
 @app.on_event("startup")
 def _create_tables() -> None:
     Base.metadata.create_all(bind=engine)
+
+@app.on_event("startup")
+def _start_scheduler() -> None:
+    """Start background scheduler for periodic image cleanup"""
+    scheduler = BackgroundScheduler()
+    # Run cleanup every 24 hours (at 2 AM)
+    scheduler.add_job(cleanup_all_unreferenced_images, 'cron', hour=2, minute=0)
+    scheduler.start()
 
 # 添加 CORS 中间件，允许前端访问
 app.add_middleware(

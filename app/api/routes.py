@@ -27,6 +27,7 @@ from ..schemas import (
     TokenResponse,
     TypstRenderRequest,
     ChartRenderRequest,
+    ImageCropRequest,
 )
 from ..security import create_access_token, get_current_user, hash_password, verify_password
 
@@ -130,6 +131,38 @@ def _prepare_typst_compilation(code: str, temp_root: Path) -> str:
         return f'{prefix}"{rel_path}"'
 
     return re.sub(pattern, repl, code)
+
+
+def cleanup_all_unreferenced_images() -> None:
+    """Periodic background task: cleanup all unreferenced images across all projects."""
+    try:
+        from ..db import SessionLocal
+        db = SessionLocal()
+        try:
+            projects = db.scalars(select(Project)).all()
+            for project in projects:
+                images_dir = _project_images_dir(project.id)
+                if not images_dir.exists():
+                    continue
+                
+                # Get referenced images
+                referenced_images = _extract_image_paths(project.typst_code or '')
+                
+                # Convert to just filenames for comparison
+                referenced_filenames = {Path(p).name for p in referenced_images}
+                
+                # Delete unreferenced images
+                for img_file in images_dir.iterdir():
+                    if img_file.is_file() and img_file.name not in referenced_filenames:
+                        try:
+                            img_file.unlink()
+                        except Exception:
+                            pass
+        finally:
+            db.close()
+    except Exception:
+        # Silently fail - don't crash the scheduler
+        pass
 
 
 @router.get("/health")
@@ -376,6 +409,73 @@ def upload_image(
     url = f"/static/projects/{project_id}/images/{target_name}"
     return {"url": url}
 
+
+@router.post("/projects/{project_id}/images/crop")
+def crop_image(
+    project_id: str,
+    payload: ImageCropRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Crop an image based on provided crop coordinates. Returns a new image URL."""
+    project = db.get(Project, project_id)
+    if project is None or project.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Extract filename from URL like "/static/projects/123/images/file.png"
+    if not payload.image_url.startswith("/static/"):
+        raise HTTPException(status_code=400, detail="Invalid image URL")
+    
+    rel_path = payload.image_url[len("/static/"):]
+    source_path = (STORAGE_ROOT / rel_path).resolve()
+    
+    # Security check: ensure the image belongs to this project
+    project_images_dir = _project_images_dir(project_id)
+    if not str(source_path).startswith(str(project_images_dir)):
+        raise HTTPException(status_code=403, detail="Image does not belong to this project")
+    
+    if not source_path.exists():
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    try:
+        # Load image
+        img = Image.open(source_path)
+        
+        # Calculate crop box from normalized coordinates
+        # The coordinates are given as percentages of the original image dimensions
+        left = int((payload.crop_x / 100) * payload.image_width)
+        top = int((payload.crop_y / 100) * payload.image_height)
+        right = int(left + (payload.crop_width / 100) * payload.image_width)
+        bottom = int(top + (payload.crop_height / 100) * payload.image_height)
+        
+        # Clamp to image bounds
+        left = max(0, min(left, img.width))
+        top = max(0, min(top, img.height))
+        right = max(left + 1, min(right, img.width))
+        bottom = max(top + 1, min(bottom, img.height))
+        
+        # Crop image
+        cropped_img = img.crop((left, top, right, bottom))
+        
+        # Save cropped image
+        images_dir = _project_images_dir(project_id)
+        ts = datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
+        ext = source_path.suffix.lstrip('.').lower() or 'png'
+        target_name = f"cropped-{ts}.{ext}"
+        target_path = images_dir / target_name
+        
+        # Convert RGBA to RGB if saving as JPEG
+        if ext.lower() in {'jpg', 'jpeg'} and cropped_img.mode == 'RGBA':
+            rgb_img = Image.new('RGB', cropped_img.size, (255, 255, 255))
+            rgb_img.paste(cropped_img, mask=cropped_img.split()[-1])
+            rgb_img.save(target_path, format='JPEG', quality=90, optimize=True)
+        else:
+            cropped_img.save(target_path, quality=90, optimize=True)
+        
+        url = f"/static/projects/{project_id}/images/{target_name}"
+        return {"url": url}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Image crop failed: {str(e)}")
 
 @router.post("/projects/{project_id}/charts/render")
 def render_chart(

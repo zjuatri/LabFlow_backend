@@ -50,3 +50,12 @@ class ChartRenderRequest(BaseModel):
     legend: bool = True
     data: list[dict] = []
 
+
+class ImageCropRequest(BaseModel):
+    image_url: str
+    crop_x: float
+    crop_y: float
+    crop_width: float
+    crop_height: float
+    image_width: float
+    image_height: float
