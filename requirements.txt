@@ -13,3 +13,4 @@ cryptography
 matplotlib
 apscheduler
 mysqlclient
+openai
