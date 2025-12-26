@@ -56,7 +56,8 @@ def _extract_image_paths(code: str) -> set[str]:
     paths = set()
     # Match both formats
     old_pattern = r'#image\("([^"]+)"\)'
-    new_pattern = r'#align\(center,\s*image\("([^"]+)"'
+    # Supports: #align(left, image("..." ...)), #align(center, ...), #align(right, ...)
+    new_pattern = r'#align\(\s*(?:left|center|right)\s*,\s*image\("([^"]+)"'
     
     for pattern in [old_pattern, new_pattern]:
         for match in re.finditer(pattern, code):
@@ -94,8 +95,8 @@ def _prepare_typst_compilation(code: str, temp_root: Path) -> str:
     """
     # Match both old and new formats
     # Old: #image("/static/path")
-    # New: #align(center, image("/static/path", width: ..., height: ...))
-    pattern = r'(#(?:align\(center,\s*)?image\()"(/static/[^"]+)"'
+    # New: #align(left|center|right, image("/static/path", width: ..., height: ...))
+    pattern = r'(#(?:align\(\s*(?:left|center|right)\s*,\s*)?image\()"(/static/[^"]+)"'
     
     def repl(m: re.Match[str]) -> str:
         prefix = m.group(1)  # e.g., "#image(" or "#align(center, image("
