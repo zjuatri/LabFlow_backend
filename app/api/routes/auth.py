@@ -26,7 +26,7 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Email already registered (该邮箱已注册)")
     db.refresh(user)
 
-    token = create_access_token(subject=user.id)
+    token = create_access_token(subject=user.id, role=user.role)
     return TokenResponse(access_token=token)
 
 
@@ -36,5 +36,5 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
     if user is None or not verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
-    token = create_access_token(subject=user.id)
+    token = create_access_token(subject=user.id, role=user.role)
     return TokenResponse(access_token=token)

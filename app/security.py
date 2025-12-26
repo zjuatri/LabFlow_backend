@@ -33,7 +33,7 @@ def verify_password(password: str, password_hash: str) -> bool:
     return pwd_context.verify(password, password_hash)
 
 
-def create_access_token(*, subject: str) -> str:
+def create_access_token(*, subject: str, role: str | None = None) -> str:
     now = datetime.now(timezone.utc)
     expire = now + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     payload = {
@@ -41,6 +41,8 @@ def create_access_token(*, subject: str) -> str:
         "iat": int(now.timestamp()),
         "exp": int(expire.timestamp()),
     }
+    if role:
+        payload["role"] = role
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
 
@@ -69,3 +71,9 @@ def get_current_user(
     if user is None:
         raise HTTPException(status_code=401, detail="User not found")
     return user
+
+
+def require_admin(current_user: User = Depends(get_current_user)) -> User:
+    if (current_user.role or "user") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    return current_user

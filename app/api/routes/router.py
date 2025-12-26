@@ -5,6 +5,7 @@ from .auth import router as auth_router
 from .projects import router as projects_router
 from .typst import router as typst_router
 from .ai import router as ai_router
+from .manage import router as manage_router
 
 router = APIRouter()
 
@@ -14,3 +15,4 @@ router.include_router(auth_router)
 router.include_router(projects_router)
 router.include_router(typst_router)
 router.include_router(ai_router)
+router.include_router(manage_router)
