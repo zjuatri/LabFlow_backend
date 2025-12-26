@@ -12,3 +12,10 @@ python-multipart
 cryptography
 matplotlib
 apscheduler
+mysqlclient
+openai
+requests
+pdfplumber
+pypdfium2
+pypdf
+requests

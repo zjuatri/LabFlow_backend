@@ -59,3 +59,17 @@ class ImageCropRequest(BaseModel):
     crop_height: float
     image_width: float
     image_height: float
+
+
+class DeepSeekChatRequest(BaseModel):
+    message: str
+    model: str = "deepseek-v3"  # 默认使用 deepseek-v3
+    stream: bool = False
+    thinking: bool = False
+
+
+class DeepSeekChatResponse(BaseModel):
+    response: str
+    model: str
+    thought: str | None = None
+    usage: dict | None = None

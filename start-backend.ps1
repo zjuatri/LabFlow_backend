@@ -116,5 +116,6 @@ $hostAddr = if ($env:HOST) { $env:HOST } else { '0.0.0.0' }
 $port = if ($env:PORT) { $env:PORT } else { '8000' }
 
 Write-Host "Starting backend on http://$hostAddr`:$port" -ForegroundColor Cyan
+Write-Host "Timeout settings: 120s for long-running AI requests" -ForegroundColor DarkCyan
 
-& $python -m uvicorn app.main:app --reload --host $hostAddr --port $port --reload-dir app --reload-exclude .venv
+& $python -m uvicorn app.main:app --reload --host $hostAddr --port $port --reload-dir app --reload-exclude .venv --timeout-keep-alive 120
