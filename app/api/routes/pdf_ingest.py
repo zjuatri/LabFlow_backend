@@ -24,6 +24,10 @@ from ...pdf_render import render_pdf_pages_to_png
 from .typst_shared import project_images_dir
 
 from PIL import Image
+from fastapi import Request
+import shutil
+import zipfile
+from ...mineru_client import MinerUClient
 
 router = APIRouter(tags=["pdf"])
 
@@ -203,6 +207,7 @@ def _glm_vision_page_ocr_with_retry(*, png_bytes: bytes, model: str, system_prom
 @router.post("/projects/{project_id}/pdf/ingest")
 async def ingest_pdf(
     project_id: str,
+    request: Request,
     file: UploadFile = File(...),
     page_start: int | None = Query(default=None, ge=1),
     page_end: int | None = Query(default=None, ge=1),
@@ -211,6 +216,7 @@ async def ingest_pdf(
     ocr_math: bool = False,
     ocr_model: str = "glm-4.6v-flash",
     ocr_scale: float = 2.0,
+    parser_mode: str = "local",
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -228,17 +234,119 @@ async def ingest_pdf(
     if page_start is not None and page_end is not None and page_end < page_start:
         raise HTTPException(status_code=400, detail="page_end must be >= page_start")
 
-    parsed = extract_pdf_payload(
-        pdf_bytes,
-        max_pages=max_pages,
-        max_chars_per_page=max_chars_per_page,
-        page_start=page_start,
-        page_end=page_end,
-    )
+    parsed = None
+    ocr_text_pages = None
+    saved_images = []
+    
+    # Ensure images dir exists
+    images_dir = project_images_dir(project_id)
+    images_dir.mkdir(parents=True, exist_ok=True)
+
+    if parser_mode == "mineru":
+        # === MinerU Path ===
+        # 1. Save PDF to static
+        # Note: We must save it to a public location.
+        # We share the same directory structure: storage/projects/{id}/files/
+        files_dir = images_dir.parent / "files"
+        files_dir.mkdir(parents=True, exist_ok=True)
+        pdf_path = files_dir / (file.filename or "input.pdf")
+        pdf_path.write_bytes(pdf_bytes)
+
+        # 2. Construct Public URL
+        # Priority: Env Var -> Request Base URL
+        public_base = os.getenv("PUBLIC_BASE_URL")
+        if not public_base:
+            # Fallback to request.base_url (e.g. http://localhost:8000/)
+            # Be careful with trailing slashes
+            public_base = str(request.base_url).rstrip("/")
+        
+        pdf_url = f"{public_base}/static/projects/{project_id}/files/{pdf_path.name}"
+        
+        # 3. Call MinerU with page range support
+        # Convert page_start/page_end to MinerU's page_ranges format
+        page_ranges = None
+        if page_start is not None or page_end is not None:
+            if page_start is not None and page_end is not None:
+                # Both specified: "start-end"
+                page_ranges = f"{page_start}-{page_end}"
+            elif page_start is not None:
+                # Only start: "start-600" (assuming max 600 pages as per MinerU limit)
+                page_ranges = f"{page_start}-600"
+            else:
+                # Only end: "1-end"
+                page_ranges = f"1-{page_end}"
+        
+        client = MinerUClient()
+        task_id = client.create_task(pdf_url, is_ocr=True, page_ranges=page_ranges)
+        # Poll
+        info = client.poll_task(task_id)
+        full_zip_url = info.get("full_zip_url")
+        if not full_zip_url:
+            raise HTTPException(status_code=500, detail="MinerU succeeded but no zip url")
+
+        # 4. Download and Extract Zip
+        import requests
+        zip_resp = requests.get(full_zip_url, timeout=60)
+        zip_resp.raise_for_status()
+        
+        with zipfile.ZipFile(io.BytesIO(zip_resp.content)) as z:
+            # MinerU zip usually has: input.md, images/xxx.jpg
+            # We look for .md file
+            md_content = ""
+            for name in z.namelist():
+                if name.endswith(".md"):
+                    md_content = z.read(name).decode("utf-8", errors="ignore")
+                elif name.startswith("images/") and not name.endswith("/"):
+                    # Extract image to our images_dir
+                    # We flatten the name or keep it? MinerU uses standard names references in MD.
+                    # content matches image path.
+                    # Let's save it to images_dir and we might need to adjust MD links if we wanted perfect render,
+                    # but for pure text ingesting, we just need to save them so they exist.
+                    # We will rename them to avoid collisions? Or kep original?
+                    # MinerU images are usually named uniquely per task or generic.
+                    # Let's prefix with mineru_
+                    base_name = os.path.basename(name)
+                    target_name = f"mineru_{task_id[:8]}_{base_name}"
+                    (images_dir / target_name).write_bytes(z.read(name))
+                    
+                    saved_images.append({
+                        "filename": target_name,
+                        "url": f"/static/projects/{project_id}/images/{target_name}",
+                        "page": 0, # Unknown page mapping from simple zip
+                        "width": 0,
+                        "height": 0,
+                        "mime": "image/jpeg" if target_name.endswith(".jpg") else "image/png",
+                        "source": "mineru"
+                    })
+
+        # Mock parsed object for compatibility
+        # We treat the whole markdown as page 1
+        class MockParsed:
+            pages_text = [md_content]
+            tables = []
+        parsed = MockParsed()
+        
+        # Populate ocr_text_pages so frontend context picks it up
+        ocr_text_pages = [{
+            "page": 1,
+            "text": md_content,
+            "error": None
+        }]
+        
+    else:
+        # === Local Path (Original) ===
+        parsed = extract_pdf_payload(
+            pdf_bytes,
+            max_pages=max_pages,
+            max_chars_per_page=max_chars_per_page,
+            page_start=page_start,
+            page_end=page_end,
+        )
 
     ocr_text_pages = None
     rendered_pages_for_ocr = None
-    if ocr_math:
+    # Support OCR math only for local mode for now, or if explicitly requested on top of MinerU (unlikely needed)
+    if parser_mode == "local" and ocr_math:
         prompts = load_prompts()
         pdf_ocr_prompt = str(prompts.get("pdf_page_ocr_prompt") or "")
         rendered_pages_for_ocr = render_pdf_pages_to_png(
@@ -276,74 +384,75 @@ async def ingest_pdf(
                     }
                 )
 
-    images_dir = project_images_dir(project_id)
-    images_dir.mkdir(parents=True, exist_ok=True)
+    # If MinerU is used, images_dir was already created and used
+    if parser_mode == "local":
+        images_dir = project_images_dir(project_id)
+        images_dir.mkdir(parents=True, exist_ok=True)
 
-    saved_images = []
-    extracted_images = extract_and_save_embedded_images(
-        pdf_bytes,
-        project_id=project_id,
-        images_dir=images_dir,
-        max_images=50,
-        max_bytes=2_000_000,
-        page_start=page_start,
-        page_end=page_end,
-    )
-
-    # Fallback for scanned PDFs / uncommon encodings:
-    # if we couldn't extract any embedded images, save rendered page previews as PNG.
-    if not extracted_images:
-        page_previews = rendered_pages_for_ocr
-        if page_previews is None:
-            page_previews = render_pdf_pages_to_png(
-                pdf_bytes,
-                page_start=page_start,
-                page_end=page_end,
-                max_pages=max_pages,
-                scale=1.5,
-            )
-
-        for rp in page_previews:
-            filename = f"page_p{int(rp.page_number)}_render.png"
-            dest = images_dir / filename
-            try:
-                # Ensure we always write a valid PNG (rp.png_bytes should already be PNG).
-                im = Image.open(io.BytesIO(rp.png_bytes))
-                im.load()
-                buf = io.BytesIO()
-                im.save(buf, format="PNG", optimize=True)
-                dest.write_bytes(buf.getvalue())
-                extracted_images.append(
-                    {
-                        "filename": filename,
-                        "mime": "image/png",
-                        "width": int(im.width),
-                        "height": int(im.height),
-                        "page_number": int(rp.page_number),
-                        "source": "page_render",
-                    }
-                )
-            except Exception:
-                # If something went wrong, skip the preview.
-                continue
-
-    for img in extracted_images:
-        filename = img.filename if hasattr(img, "filename") else str(img.get("filename"))
-        public_url = f"/static/projects/{project_id}/images/{filename}"
-        source = "embedded"
-        if not hasattr(img, "filename"):
-            source = str(img.get("source") or "embedded")
-        saved_images.append(
-            {
-                "filename": filename,
-                "url": public_url,
-                "page": (img.page_number if hasattr(img, "page_number") else int(img.get("page_number") or 0)),
-                "width": (img.width if hasattr(img, "width") else img.get("width")),
-                "height": (img.height if hasattr(img, "height") else img.get("height")),
-                "mime": (img.mime if hasattr(img, "mime") else str(img.get("mime") or "image/png")),
-                "source": source,
-            }
+        extracted_images = extract_and_save_embedded_images(
+            pdf_bytes,
+            project_id=project_id,
+            images_dir=images_dir,
+            max_images=50,
+            max_bytes=2_000_000,
+            page_start=page_start,
+            page_end=page_end,
         )
+
+        # Fallback for scanned PDFs / uncommon encodings:
+        # if we couldn't extract any embedded images, save rendered page previews as PNG.
+        if not extracted_images:
+            page_previews = rendered_pages_for_ocr
+            if page_previews is None:
+                page_previews = render_pdf_pages_to_png(
+                    pdf_bytes,
+                    page_start=page_start,
+                    page_end=page_end,
+                    max_pages=max_pages,
+                    scale=1.5,
+                )
+
+            for rp in page_previews:
+                filename = f"page_p{int(rp.page_number)}_render.png"
+                dest = images_dir / filename
+                try:
+                    # Ensure we always write a valid PNG (rp.png_bytes should already be PNG).
+                    im = Image.open(io.BytesIO(rp.png_bytes))
+                    im.load()
+                    buf = io.BytesIO()
+                    im.save(buf, format="PNG", optimize=True)
+                    dest.write_bytes(buf.getvalue())
+                    extracted_images.append(
+                        {
+                            "filename": filename,
+                            "mime": "image/png",
+                            "width": int(im.width),
+                            "height": int(im.height),
+                            "page_number": int(rp.page_number),
+                            "source": "page_render",
+                        }
+                    )
+                except Exception:
+                    # If something went wrong, skip the preview.
+                    continue
+
+        for img in extracted_images:
+            filename = img.filename if hasattr(img, "filename") else str(img.get("filename"))
+            public_url = f"/static/projects/{project_id}/images/{filename}"
+            source = "embedded"
+            if not hasattr(img, "filename"):
+                source = str(img.get("source") or "embedded")
+            saved_images.append(
+                {
+                    "filename": filename,
+                    "url": public_url,
+                    "page": (img.page_number if hasattr(img, "page_number") else int(img.get("page_number") or 0)),
+                    "width": (img.width if hasattr(img, "width") else img.get("width")),
+                    "height": (img.height if hasattr(img, "height") else img.get("height")),
+                    "mime": (img.mime if hasattr(img, "mime") else str(img.get("mime") or "image/png")),
+                    "source": source,
+                }
+            )
 
     tables = []
     for t in parsed.tables:
@@ -374,6 +483,7 @@ async def ingest_pdf(
             "ocr_math": bool(ocr_math),
             "ocr_model": ocr_model,
             "ocr_scale": float(ocr_scale),
+            "parser_mode": parser_mode,
         },
         "text_pages": parsed.pages_text,
         "ocr_text_pages": ocr_text_pages,
