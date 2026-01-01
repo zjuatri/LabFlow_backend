@@ -7,12 +7,54 @@ import os
 import re
 import shutil
 
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 from fastapi import HTTPException
 
 # Filesystem storage root (same as mounted /static in main.py)
 # main.py uses <repo_root>/storage (i.e., parent of app/)
 STORAGE_ROOT = Path(os.getenv("STORAGE_ROOT") or (Path(__file__).resolve().parents[3] / "storage"))
+
+def create_placeholder_image(dest_path: Path, text: str = "图片不存在"):
+    """Create a placeholder image with text if possible."""
+    try:
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        width, height = 800, 600
+        # Light red background
+        img = Image.new('RGB', (width, height), color=(250, 235, 235))
+        draw = ImageDraw.Draw(img)
+
+        # Try to load a Chinese font on Windows
+        font = None
+        font_paths = [
+            "C:/Windows/Fonts/msyh.ttc",   # Microsoft YaHei
+            "C:/Windows/Fonts/simhei.ttf",  # SimHei
+            "arial.ttf"                     # Fallback
+        ]
+        for fp in font_paths:
+            if os.path.exists(fp):
+                try:
+                    font = ImageFont.truetype(fp, 60)
+                    break
+                except:
+                    continue
+
+        if font is None:
+            font = ImageFont.load_default()
+
+        # In newer PIL versions, textbbox is preferred
+        try:
+            bbox = draw.textbbox((0, 0), text, font=font)
+            tw = bbox[2] - bbox[0]
+            th = bbox[3] - bbox[1]
+        except:
+            tw, th = 400, 60 # fallback estimate
+
+        draw.text(((width - tw) / 2, (height - th) / 2), text, fill=(200, 50, 50), font=font)
+        img.save(dest_path, "JPEG")
+        return True
+    except Exception as e:
+        print(f"Error creating placeholder image: {e}")
+        return False
 
 
 def project_storage_dir(project_id: str) -> Path:
@@ -55,11 +97,15 @@ def cleanup_unused_images(project_id: str, old_code: str, new_code: str) -> None
 
 
 def prepare_typst_compilation(code: str, temp_root: Path) -> str:
-    pattern = r'(#(?:align\(center,\s*)?image\()"(/static/[^"]+)"'
+    # Match any image("...") call that references /static/ paths
+    # This handles:
+    # - #image("/static/...")
+    # - #align(center, image("/static/..."))
+    # - #block(...)[...image("/static/...")...]
+    pattern = r'image\("(/static/[^"]+)"'
 
     def repl(m: re.Match[str]) -> str:
-        prefix = m.group(1)
-        url_path = m.group(2)
+        url_path = m.group(1)
 
         if not url_path.startswith("/static/"):
             return m.group(0)
@@ -71,16 +117,32 @@ def prepare_typst_compilation(code: str, temp_root: Path) -> str:
             return m.group(0)
 
         if not source_path.exists():
-            return m.group(0)
+            # Try to find a file with mineru_ prefix
+            parent = source_path.parent
+            basename = source_path.name
+            if parent.exists():
+                for f in parent.iterdir():
+                    if f.name.endswith(basename) and f.is_file():
+                        source_path = f
+                        break
+            if not source_path.exists():
+                # Generate a placeholder image to prevent compilation failure
+                dest_path = temp_root / rel_path
+                if create_placeholder_image(dest_path):
+                    return f'image("{rel_path}"'
+                return m.group(0)
 
         dest_path = temp_root / rel_path
         try:
             dest_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source_path, dest_path)
         except Exception:
+            # If copy fails, also try to generate placeholder
+            if create_placeholder_image(dest_path):
+                return f'image("{rel_path}"'
             return m.group(0)
 
-        return f'{prefix}"{rel_path}"'
+        return f'image("{rel_path}"'
 
     return re.sub(pattern, repl, code)
 

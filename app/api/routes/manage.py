@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
 from ...prompt_store import load_prompt, load_prompts, save_prompt, save_prompts
-from ...security import require_admin
+from ...security import require_admin, get_current_user
 
 router = APIRouter()
 
@@ -32,7 +32,7 @@ class PromptsUpdateRequest(BaseModel):
 
 
 @router.get("/manage/prompt", response_model=PromptResponse)
-def get_prompt(_admin=Depends(require_admin)):
+def get_prompt(current_user=Depends(get_current_user)):
     data = load_prompt()
     return PromptResponse(ai_prompt=data["ai_prompt"], updated_at=data.get("updated_at"))
 

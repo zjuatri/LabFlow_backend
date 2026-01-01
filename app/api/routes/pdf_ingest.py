@@ -204,6 +204,129 @@ def _glm_vision_page_ocr_with_retry(*, png_bytes: bytes, model: str, system_prom
             time.sleep(wait)
 
 
+@router.post("/projects/{project_id}/pdf/ingest-url")
+async def ingest_pdf_url(
+    project_id: str,
+    url: str = Query(..., description="Public URL of the PDF to parse"),
+    page_start: int | None = Query(None),
+    page_end: int | None = Query(None),
+    parser_mode: str = Query("mineru"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """MinerU-specific endpoint: parse PDF from a public URL directly."""
+    import logging
+    logger = logging.getLogger(__name__)
+    
+    # Validate project exists
+    project = db.query(Project).filter_by(id=project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    
+    # Prepare images directory
+    images_dir = project_images_dir(project_id)
+    images_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Build page_ranges
+    page_ranges = None
+    if page_start is not None or page_end is not None:
+        if page_start is not None and page_end is not None:
+            page_ranges = f"{page_start}-{page_end}"
+        elif page_start is not None:
+            page_ranges = f"{page_start}-600"
+        else:
+            page_ranges = f"1-{page_end}"
+    
+    print(f"\n{'='*80}\n🔗 MinerU URL-based ingest: {url}\n   page_ranges: {page_ranges}\n{'='*80}\n", flush=True)
+    
+    try:
+        client = MinerUClient()
+        task_id = client.create_task(url, is_ocr=True, page_ranges=page_ranges)
+        logger.info(f"MinerU: Task created with id={task_id}")
+        
+        info = client.poll_task(task_id)
+        full_zip_url = info.get("full_zip_url")
+        if not full_zip_url:
+            raise HTTPException(status_code=500, detail="MinerU succeeded but no zip url")
+        
+        # Download and extract
+        import requests
+        zip_resp = requests.get(full_zip_url, timeout=60)
+        zip_resp.raise_for_status()
+        
+        saved_images = []
+        md_content = ""
+        
+        with zipfile.ZipFile(io.BytesIO(zip_resp.content)) as z:
+            # Debug: log all files in the zip
+            all_files = z.namelist()
+            print(f"\n{'='*60}\n📦 MinerU ZIP contents ({len(all_files)} files):", flush=True)
+            for name in all_files:
+                print(f"   - {name}", flush=True)
+            print(f"{'='*60}\n", flush=True)
+            
+            for name in all_files:
+                lower_name = name.lower()
+                
+                # Extract markdown files
+                if name.endswith(".md"):
+                    md_content = z.read(name).decode("utf-8", errors="ignore")
+                    print(f"📝 Found markdown: {name} ({len(md_content)} chars)", flush=True)
+                
+                # Extract image files (support various directory structures)
+                # MinerU may use: images/, image/, or put images at root level
+                is_image = (
+                    lower_name.endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp')) and
+                    not name.endswith("/")  # Not a directory
+                )
+                if is_image:
+                    base_name = os.path.basename(name)
+                    # Prefix with task ID to avoid collisions
+                    target_name = f"mineru_{task_id[:8]}_{base_name}"
+                    target_path = images_dir / target_name
+                    target_path.write_bytes(z.read(name))
+                    print(f"🖼️ Extracted image: {name} -> {target_name}", flush=True)
+                    
+                    saved_images.append({
+                        "filename": target_name,
+                        "url": f"/static/projects/{project_id}/images/{target_name}",
+                        "page": 0,
+                        "source": "mineru",
+                        "original_name": base_name,  # Keep original name for MD link rewriting
+                    })
+        
+        # Rewrite image links in markdown to use our saved paths
+        for img in saved_images:
+            original = img.get("original_name", "")
+            if original and original in md_content:
+                new_path = img["url"]
+                # Handle various markdown image syntaxes
+                md_content = md_content.replace(f"](images/{original})", f"]({new_path})")
+                md_content = md_content.replace(f"](/images/{original})", f"]({new_path})")
+                md_content = md_content.replace(f"]({original})", f"]({new_path})")
+                print(f"🔗 Rewrote image link: {original} -> {new_path}", flush=True)
+        
+        ocr_text_pages = [{
+            "page": 1,
+            "text": md_content,
+            "error": None
+        }]
+        
+        return {
+            "project_id": project_id,
+            "parser_mode": "mineru",
+            "source_url": url,
+            "ocr_text_pages": ocr_text_pages,
+            "images": saved_images,
+            "tables": [],
+            "extracted_at": datetime.utcnow().isoformat() + "Z",
+        }
+        
+    except Exception as e:
+        logger.error(f"MinerU URL ingest failed: {e}")
+        raise HTTPException(status_code=500, detail=f"MinerU failed: {str(e)}")
+
+
 @router.post("/projects/{project_id}/pdf/ingest")
 async def ingest_pdf(
     project_id: str,
@@ -237,6 +360,7 @@ async def ingest_pdf(
     parsed = None
     ocr_text_pages = None
     saved_images = []
+    mineru_debug_url = None  # For frontend debugging
     
     # Ensure images dir exists
     images_dir = project_images_dir(project_id)
@@ -251,6 +375,10 @@ async def ingest_pdf(
         files_dir.mkdir(parents=True, exist_ok=True)
         pdf_path = files_dir / (file.filename or "input.pdf")
         pdf_path.write_bytes(pdf_bytes)
+        
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"MinerU: PDF saved to {pdf_path} ({len(pdf_bytes)} bytes)")
 
         # 2. Construct Public URL
         # Priority: Env Var -> Request Base URL
@@ -260,7 +388,13 @@ async def ingest_pdf(
             # Be careful with trailing slashes
             public_base = str(request.base_url).rstrip("/")
         
-        pdf_url = f"{public_base}/static/projects/{project_id}/files/{pdf_path.name}"
+        # URL-encode the filename to handle non-ASCII characters (e.g., Chinese)
+        from urllib.parse import quote
+        encoded_filename = quote(pdf_path.name, safe='')
+        pdf_url = f"{public_base}/static/projects/{project_id}/files/{encoded_filename}"
+        mineru_debug_url = pdf_url  # Save for response
+        logger.info(f"MinerU: Constructed PDF URL: {pdf_url}")
+        print(f"\n{'='*80}\n🔗 MinerU PDF URL: {pdf_url}\n{'='*80}\n", flush=True)
         
         # 3. Call MinerU with page range support
         # Convert page_start/page_end to MinerU's page_ranges format
@@ -276,8 +410,11 @@ async def ingest_pdf(
                 # Only end: "1-end"
                 page_ranges = f"1-{page_end}"
         
+        logger.info(f"MinerU: page_ranges={page_ranges}")
+        
         client = MinerUClient()
         task_id = client.create_task(pdf_url, is_ocr=True, page_ranges=page_ranges)
+        logger.info(f"MinerU: Task created with id={task_id}")
         # Poll
         info = client.poll_task(task_id)
         full_zip_url = info.get("full_zip_url")
@@ -489,5 +626,6 @@ async def ingest_pdf(
         "ocr_text_pages": ocr_text_pages,
         "tables": tables,
         "images": saved_images,
+        "mineru_debug_url": mineru_debug_url,  # For debugging MinerU access issues
         "extracted_at": datetime.utcnow().isoformat() + "Z",
     }
