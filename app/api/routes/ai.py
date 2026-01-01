@@ -27,25 +27,44 @@ async def chat_with_deepseek(
 
     from openai import OpenAI
 
-    api_key = os.environ.get("ZJU_DEEPSEEK_API_KEY")
-    if not api_key:
-        raise HTTPException(
-            status_code=500,
-            detail="ZJU_DEEPSEEK_API_KEY not configured (ZJU_DEEPSEEK_API_KEY 未配置)",
-        )
+    api_key = None
+    base_url = None
 
-    allowed_models = ["deepseek-r1-671b", "deepseek-v3"]
+    if payload.model.startswith("deepseek"):
+        api_key = os.environ.get("DEEPSEEK_API_KEY")
+        if not api_key:
+            raise HTTPException(
+                status_code=500,
+                detail="DEEPSEEK_API_KEY not configured",
+            )
+        base_url = "https://api.deepseek.com"
+    elif payload.model == "qwen3-max":
+        api_key = os.environ.get("DASHSCOPE_API_KEY")
+        if not api_key:
+            raise HTTPException(
+                status_code=500,
+                detail="DASHSCOPE_API_KEY not configured",
+            )
+        base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+        base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+    allowed_models = ["deepseek-chat", "deepseek-reasoner", "qwen3-max"]
     if payload.model not in allowed_models:
         raise HTTPException(status_code=400, detail=f"Invalid model. Allowed models: {', '.join(allowed_models)}")
 
     client = OpenAI(
         api_key=api_key,
-        base_url="https://chat.zju.edu.cn/api/ai/v1",
+        base_url=base_url,
         timeout=120.0,
         max_retries=2,
     )
 
-    extra_body = {"thinking": {"type": "enabled" if payload.thinking else "disabled"}}
+    extra_body = {}
+    # Official DeepSeek driver does not use 'thinking' param for deepseek-reasoner;
+    # deepseek-reasoner automatically produces thought.
+    # deepseek-chat is standard mode.
+    # So we remove the ZJU-specific 'thinking' extra_body injection.
 
     def sse(data_obj: dict) -> bytes:
         return ("data: " + json.dumps(data_obj, ensure_ascii=False) + "\n\n").encode("utf-8")
@@ -56,12 +75,14 @@ async def chat_with_deepseek(
             messages=[
                 {
                     "role": "system",
-                    "content": "You are a helpful assistant that helps users generate scientific experiment reports. Please respond in Chinese.",
+                    "content": "You are a helpful assistant that helps users generate scientific experiment reports. Please parse the user's input and output in valid JSON format. Please respond in Chinese.",
                 },
                 {"role": "user", "content": payload.message},
             ],
             stream=True,
-            extra_body=extra_body,
+            temperature=1.0,  # Recommended for data extraction/analysis scenarios
+            response_format={"type": "json_object"},
+            extra_body=extra_body if extra_body else None,
         )
 
         def gen():
@@ -80,6 +101,8 @@ async def chat_with_deepseek(
                             "prompt_tokens": getattr(usage, "prompt_tokens", None),
                             "completion_tokens": getattr(usage, "completion_tokens", None),
                             "total_tokens": getattr(usage, "total_tokens", None),
+                            "prompt_cache_hit_tokens": getattr(usage, "prompt_cache_hit_tokens", None),
+                            "prompt_cache_miss_tokens": getattr(usage, "prompt_cache_miss_tokens", None),
                         }
                 except Exception:
                     pass
@@ -136,12 +159,14 @@ async def chat_with_deepseek(
         messages=[
             {
                 "role": "system",
-                "content": "You are a helpful assistant that helps users generate scientific experiment reports. Please respond in Chinese.",
+                "content": "You are a helpful assistant that helps users generate scientific experiment reports. Please parse the user's input and output in valid JSON format. Please respond in Chinese.",
             },
             {"role": "user", "content": payload.message},
         ],
         stream=False,
-        extra_body=extra_body,
+        temperature=1.0,  # Recommended for data extraction/analysis scenarios
+        response_format={"type": "json_object"},
+        extra_body=extra_body if extra_body else None,
         timeout=120.0,
     )
 
@@ -178,6 +203,8 @@ async def chat_with_deepseek(
                 "prompt_tokens": getattr(usage, "prompt_tokens", None),
                 "completion_tokens": getattr(usage, "completion_tokens", None),
                 "total_tokens": getattr(usage, "total_tokens", None),
+                "prompt_cache_hit_tokens": getattr(usage, "prompt_cache_hit_tokens", None),
+                "prompt_cache_miss_tokens": getattr(usage, "prompt_cache_miss_tokens", None),
             }
     except Exception:
         usage_dict = None

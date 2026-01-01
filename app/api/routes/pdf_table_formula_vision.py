@@ -4,6 +4,7 @@ import asyncio
 import base64
 import io
 import json
+import re
 import time
 from datetime import datetime
 
@@ -14,6 +15,7 @@ from sqlalchemy.orm import Session
 from ...db import get_db
 from ...glm_client import GlmApiError, glm_chat_completions
 from ...models import Project, User
+from ...prompt_store import load_prompts
 from ...security import get_current_user
 from ...pdf_ingest import extract_pdf_payload
 from ...pdf_render import render_pdf_crop_to_png
@@ -65,13 +67,36 @@ def _call_glm_with_retry(model: str, messages: list, timeout_s: float = 180.0):
 
 
 def _extract_json_object(text: str) -> dict:
-    """Best-effort extraction of a JSON object from model text."""
+    """Best-effort extraction of a JSON object from model text.
+    
+    Handles LaTeX content by treating backslashes carefully to avoid
+    JSON escape sequence issues (e.g., \\beta, \\text).
+    """
 
     text = (text or "").strip()
     if not text:
         raise ValueError("empty content")
 
-    # Fast path
+    # Helper to fix backslashes in JSON string values for LaTeX
+    def fix_latex_escapes(json_str: str) -> str:
+        """Replace single backslashes with double backslashes inside JSON string values."""
+        import re
+        # Match JSON string values (content between quotes, accounting for escaped quotes)
+        # This regex finds "..." patterns and replaces single \ with \\
+        def replace_in_string(match):
+            content = match.group(1)
+            # Replace single backslash with double backslash, but avoid already-escaped ones
+            # This is tricky: we need to escape \ that aren't already escaped
+            # Simple approach: replace all \ with \\ then fix any \\\\ back to \\
+            fixed = content.replace('\\', '\\\\')
+            return f'"{fixed}"'
+        
+        # Pattern to match string values in JSON (handles escaped quotes)
+        # This matches "...", being careful about escaped quotes inside
+        pattern = r'"((?:[^"\\]|\\.)*)?"'
+        return re.sub(pattern, replace_in_string, json_str)
+
+    # Fast path: try direct parse first
     try:
         obj = json.loads(text)
         if isinstance(obj, dict):
@@ -79,14 +104,25 @@ def _extract_json_object(text: str) -> dict:
     except Exception:
         pass
 
-    # Try to locate first {...} block
+    # Try to locate first {...} block and fix escapes
     start = text.find("{")
     end = text.rfind("}")
     if start != -1 and end != -1 and end > start:
         snippet = text[start : end + 1]
-        obj = json.loads(snippet)
-        if isinstance(obj, dict):
-            return obj
+        try:
+            # Try parsing with escape fixes for LaTeX content
+            fixed = fix_latex_escapes(snippet)
+            obj = json.loads(fixed)
+            if isinstance(obj, dict):
+                return obj
+        except Exception:
+            # Fall back to original if fixing breaks it
+            try:
+                obj = json.loads(snippet)
+                if isinstance(obj, dict):
+                    return obj
+            except Exception:
+                pass
 
     raise ValueError("unable to parse JSON object")
 
@@ -137,6 +173,11 @@ async def pdf_table_formula_vision(
 
     images_dir = project_images_dir(project_id)
     images_dir.mkdir(parents=True, exist_ok=True)
+
+    prompts = load_prompts()
+    table_cell_prompt = str(prompts.get("table_cell_ocr_prompt") or "").strip()
+    if not table_cell_prompt:
+        table_cell_prompt = '你是一个严谨的 OCR/公式识别助手。最终输出 JSON: {"latex": ""}。'
 
     out_tables: list[dict] = []
     rendered_cell_images: list[dict] = []
@@ -220,15 +261,7 @@ async def pdf_table_formula_vision(
                     )
 
                     b64 = base64.b64encode(crop.png_bytes).decode("ascii")
-                    system_prompt = (
-                        "你是一个严谨的 OCR/公式识别助手。\n"
-                        "我会给你一张来自 PDF 表格单元格的截图。\n"
-                        "请你：\n"
-                        "1) 如果单元格中包含数学公式，尽可能转换为 LaTeX。\n"
-                        "2) 如果没有公式，latex 返回空字符串。\n"
-                        "3) 最终输出必须是 JSON: {latex: string}。\n"
-                        "不要输出任何额外文字。\n"
-                    )
+                    system_prompt = table_cell_prompt
                     user_prompt = {
                         "role": "user",
                         "content": [

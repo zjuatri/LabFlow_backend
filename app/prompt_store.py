@@ -6,6 +6,19 @@ from pathlib import Path
 from typing import Any
 
 
+def _prompts_path() -> Path:
+    """Path for editable prompts.
+
+    We keep prompts out of /storage so they can be committed to git, while
+    still supporting older deployments that stored them under STORAGE_ROOT.
+    """
+
+    # Preferred, repo-friendly location.
+    root = Path(__file__).resolve().parent.parent / "prompts"
+    root.mkdir(parents=True, exist_ok=True)
+    return root / "ai_prompts.json"
+
+
 def _storage_path() -> Path:
     # Persist under backend storage so it survives restarts and is easy to mount.
     root = Path(os.getenv("STORAGE_ROOT") or (Path(__file__).resolve().parent.parent / "storage"))
@@ -34,35 +47,117 @@ DEFAULT_AI_PROMPT_TEMPLATE = (
 )
 
 
-def load_prompt() -> dict[str, Any]:
-    path = _storage_path()
+DEFAULT_PDF_PAGE_OCR_PROMPT = (
+    "你是一个严谨的 OCR 助手，擅长从论文/教材 PDF 截图中提取文字与数学公式。\n"
+    "我会给你一张 PDF 页面截图。\n"
+    "请输出 JSON，格式必须严格为：{\"lines\": [\"...\", \"...\"]}。\n"
+    "要求：\n"
+    "1) 普通文字按原顺序输出；每一行单独作为 lines 数组的一个元素（不要把整页塞进一个长字符串）。\n"
+    "2) 任何数学符号/公式必须转写为 LaTeX。\n"
+    "3) 行内公式必须用 \\( ... \\) 包裹；行间公式必须用 \\[ ... \\] 包裹。\n"
+    "4) 禁止输出 Unicode 数学形式（例如 η、α、β、₀、上标/下标字符）。必须用 LaTeX（例如 \\\\eta, \\\\alpha_0）。\n"
+    "5) JSON 字符串中的反斜杠必须转义为双反斜杠（例如 \\\\beta、\\\\text）。\n"
+    "6) 只输出 JSON，不要输出任何额外文字。\n"
+)
+
+
+DEFAULT_TABLE_CELL_OCR_PROMPT = (
+    "你是一个严谨的 OCR/公式识别助手。\n"
+    "我会给你一张来自 PDF 表格单元格的截图。\n"
+    "请你：\n"
+    "1) 如果单元格中包含数学公式，尽可能转换为 LaTeX。\n"
+    "2) 如果没有公式，latex 返回空字符串。\n"
+    "3) 最终输出必须是有效的 JSON: {\"latex\": \"string\"}。\n"
+    "4) 注意：LaTeX 中的反斜杠必须转义为双反斜杠（例如 \\\\beta 而不是 \\beta）。\n"
+    "不要输出任何额外文字。\n"
+)
+
+
+def load_prompts() -> dict[str, Any]:
+    """Load all editable prompts with defaults and backward compatibility."""
+
+    path = _prompts_path()
+    legacy_path = _storage_path()
+    defaults = {
+        "ai_prompt": DEFAULT_AI_PROMPT_TEMPLATE,
+        "pdf_page_ocr_prompt": DEFAULT_PDF_PAGE_OCR_PROMPT,
+        "table_cell_ocr_prompt": DEFAULT_TABLE_CELL_OCR_PROMPT,
+        "updated_at": None,
+    }
+
+    if not path.exists() and legacy_path.exists():
+        path = legacy_path
+
     if not path.exists():
-        return {"ai_prompt": DEFAULT_AI_PROMPT_TEMPLATE, "updated_at": None}
+        return defaults
 
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(data, dict):
-            if isinstance(data.get("ai_prompt"), str):
-                # Back-compat: older deployments stored only a prefix prompt.
-                stored = data["ai_prompt"]
-                if "{{USER_INPUT_JSON}}" in stored or "{{PROJECT_ID}}" in stored:
-                    return {"ai_prompt": stored, "updated_at": data.get("updated_at")}
-                return {
-                    "ai_prompt": stored.rstrip() + "\n\n" + DEFAULT_AI_PROMPT_TEMPLATE[len(DEFAULT_AI_PROMPT_PREFIX):],
-                    "updated_at": data.get("updated_at"),
-                }
-            if isinstance(data.get("ai_prompt_template"), str):
-                return {"ai_prompt": data["ai_prompt_template"], "updated_at": data.get("updated_at")}
-    except Exception:
-        pass
+        if not isinstance(data, dict):
+            return defaults
 
-    return {"ai_prompt": DEFAULT_AI_PROMPT_TEMPLATE, "updated_at": None}
+        out = {**defaults}
+
+        # Back-compat keys
+        stored_ai = None
+        if isinstance(data.get("ai_prompt"), str):
+            stored_ai = data.get("ai_prompt")
+        elif isinstance(data.get("ai_prompt_template"), str):
+            stored_ai = data.get("ai_prompt_template")
+
+        if isinstance(stored_ai, str):
+            # Back-compat: older deployments stored only a prefix prompt.
+            if "{{USER_INPUT_JSON}}" in stored_ai or "{{PROJECT_ID}}" in stored_ai:
+                out["ai_prompt"] = stored_ai
+            else:
+                out["ai_prompt"] = stored_ai.rstrip() + "\n\n" + DEFAULT_AI_PROMPT_TEMPLATE[len(DEFAULT_AI_PROMPT_PREFIX) :]
+
+        if isinstance(data.get("pdf_page_ocr_prompt"), str):
+            out["pdf_page_ocr_prompt"] = data["pdf_page_ocr_prompt"]
+        if isinstance(data.get("table_cell_ocr_prompt"), str):
+            out["table_cell_ocr_prompt"] = data["table_cell_ocr_prompt"]
+
+        out["updated_at"] = data.get("updated_at")
+        return out
+    except Exception:
+        return defaults
+
+
+def save_prompts(
+    *,
+    ai_prompt: str | None = None,
+    pdf_page_ocr_prompt: str | None = None,
+    table_cell_ocr_prompt: str | None = None,
+) -> dict[str, Any]:
+    """Save one or more prompts; unspecified fields keep current values."""
+
+    from datetime import datetime
+
+    current = load_prompts()
+    if ai_prompt is not None:
+        current["ai_prompt"] = ai_prompt
+    if pdf_page_ocr_prompt is not None:
+        current["pdf_page_ocr_prompt"] = pdf_page_ocr_prompt
+    if table_cell_ocr_prompt is not None:
+        current["table_cell_ocr_prompt"] = table_cell_ocr_prompt
+
+    current["updated_at"] = datetime.utcnow().isoformat() + "Z"
+
+    path = _prompts_path()
+    payload = {
+        "ai_prompt": current["ai_prompt"],
+        "pdf_page_ocr_prompt": current["pdf_page_ocr_prompt"],
+        "table_cell_ocr_prompt": current["table_cell_ocr_prompt"],
+        "updated_at": current["updated_at"],
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return payload
+
+
+def load_prompt() -> dict[str, Any]:
+    data = load_prompts()
+    return {"ai_prompt": data["ai_prompt"], "updated_at": data.get("updated_at")}
 
 
 def save_prompt(ai_prompt: str) -> dict[str, Any]:
-    from datetime import datetime
-
-    path = _storage_path()
-    payload = {"ai_prompt": ai_prompt, "updated_at": datetime.utcnow().isoformat() + "Z"}
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    return payload
+    return save_prompts(ai_prompt=ai_prompt)

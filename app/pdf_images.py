@@ -24,6 +24,48 @@ def _detect_image_ext_and_mime(raw: bytes) -> tuple[str, str]:
     return "png", "image/png"
 
 
+def _as_list(value) -> list:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return [value]
+
+
+def _get_pdf_name(value) -> str | None:
+    if value is None:
+        return None
+    try:
+        # pypdf NameObject prints like '/DeviceRGB'
+        s = str(value)
+    except Exception:
+        return None
+    return s
+
+
+def _get_filters(xobj) -> list[str]:
+    filt = xobj.get("/Filter") if hasattr(xobj, "get") else None
+    out: list[str] = []
+    for v in _as_list(filt):
+        name = _get_pdf_name(v)
+        if name:
+            out.append(name)
+    return out
+
+
+def _get_colorspace_name(xobj) -> str | None:
+    cs = xobj.get("/ColorSpace") if hasattr(xobj, "get") else None
+    name = _get_pdf_name(cs)
+    if name and name.startswith("/"):
+        return name
+    # Some PDFs store ColorSpace as an array like ['/ICCBased', <obj>]
+    if isinstance(cs, (list, tuple)) and cs:
+        head = _get_pdf_name(cs[0])
+        if head and head.startswith("/"):
+            return head
+    return None
+
+
 def extract_and_save_embedded_images(
     pdf_bytes: bytes,
     *,
@@ -89,21 +131,51 @@ def extract_and_save_embedded_images(
                 image = Image.open(io.BytesIO(raw))
                 image.load()
             except Exception:
-                # If PIL can't open it, save bytes as-is with best-effort extension.
-                ext, mime = _detect_image_ext_and_mime(raw)
-                filename = f"pdf_p{page_index + 1}_{len(saved)}.{ext}"
-                dest = images_dir / filename
-                dest.write_bytes(raw[:max_bytes])
-                saved.append(
-                    SavedPdfImage(
-                        filename=filename,
-                        mime=mime,
-                        width=int(xobj.get("/Width") or 0),
-                        height=int(xobj.get("/Height") or 0),
-                        page_number=page_index + 1,
-                    )
-                )
-                continue
+                # PIL can't open it.
+                # Many PDFs store images as raw pixel buffers (e.g. /FlateDecode) without a file header.
+                # We try a minimal reconstruction for common cases so browsers can display them.
+                filters = _get_filters(xobj)
+                cs_name = _get_colorspace_name(xobj)
+                width = int(xobj.get("/Width") or 0)
+                height = int(xobj.get("/Height") or 0)
+                bpc = int(xobj.get("/BitsPerComponent") or 8)
+
+                reconstructed: Image.Image | None = None
+                if width > 0 and height > 0 and bpc == 8 and "/FlateDecode" in filters:
+                    try:
+                        if cs_name == "/DeviceRGB":
+                            reconstructed = Image.frombytes("RGB", (width, height), raw)
+                        elif cs_name == "/DeviceGray":
+                            reconstructed = Image.frombytes("L", (width, height), raw)
+                        elif cs_name == "/DeviceCMYK":
+                            reconstructed = Image.frombytes("CMYK", (width, height), raw)
+                    except Exception:
+                        reconstructed = None
+
+                if reconstructed is None:
+                    # As a last resort, only save when it already looks like a real JPEG/PNG.
+                    ext, mime = _detect_image_ext_and_mime(raw)
+                    if ext in ("jpg", "png") and (
+                        (ext == "jpg" and raw[:2] == b"\xFF\xD8")
+                        or (ext == "png" and raw[:8] == b"\x89PNG\r\n\x1a\n")
+                    ):
+                        filename = f"pdf_p{page_index + 1}_{len(saved)}.{ext}"
+                        dest = images_dir / filename
+                        dest.write_bytes(raw[:max_bytes])
+                        saved.append(
+                            SavedPdfImage(
+                                filename=filename,
+                                mime=mime,
+                                width=width,
+                                height=height,
+                                page_number=page_index + 1,
+                            )
+                        )
+                    # Otherwise skip unsupported/corrupt image bytes.
+                    continue
+
+                # Normalize mode and encode reconstructed image as PNG.
+                image = reconstructed
 
             # Normalize mode (P) etc.
             if image.mode not in ("RGB", "RGBA"):
