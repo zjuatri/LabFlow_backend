@@ -35,18 +35,77 @@ def create_project(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    import uuid
+    import re
+    project_id = str(uuid.uuid4())
+    typst_code = DEFAULT_TYPST_CODE
+    
+    # Collect all referenced project IDs from source typst_code
+    referenced_project_ids: set[str] = set()
+
+    if payload.source_project_id:
+        source = db.get(Project, payload.source_project_id)
+        if not source or source.user_id != current_user.id:
+            raise HTTPException(status_code=404, detail="Source project not found")
+        
+        # Find all project IDs referenced in the typst code (images/charts paths)
+        # Pattern matches UUIDs in paths like /static/projects/<uuid>/ or projects/<uuid>/
+        uuid_pattern = r'projects/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/'
+        referenced_project_ids = set(re.findall(uuid_pattern, source.typst_code, re.IGNORECASE))
+        
+        # Replace ALL project IDs in paths with new project ID
+        # Pattern 1: /static/projects/<uuid>/images/ or /charts/ (absolute paths)
+        typst_code = re.sub(
+            r'/static/projects/[0-9a-f-]+/images/',
+            f'/static/projects/{project_id}/images/',
+            source.typst_code,
+            flags=re.IGNORECASE
+        )
+        typst_code = re.sub(
+            r'/static/projects/[0-9a-f-]+/charts/',
+            f'/static/projects/{project_id}/charts/',
+            typst_code,
+            flags=re.IGNORECASE
+        )
+        
+        # Pattern 2: projects/<uuid>/images/ or /charts/ (relative paths without /static/)
+        typst_code = re.sub(
+            r'(?<!/static/)projects/[0-9a-f-]+/images/',
+            f'projects/{project_id}/images/',
+            typst_code,
+            flags=re.IGNORECASE
+        )
+        typst_code = re.sub(
+            r'(?<!/static/)projects/[0-9a-f-]+/charts/',
+            f'projects/{project_id}/charts/',
+            typst_code,
+            flags=re.IGNORECASE
+        )
+
     now = datetime.now(timezone.utc)
     project = Project(
+        id=project_id,
         user_id=current_user.id,
         title=payload.title,
         type=payload.type,
-        typst_code=DEFAULT_TYPST_CODE,
+        typst_code=typst_code,
         created_at=now,
         updated_at=now,
     )
     db.add(project)
     db.commit()
     db.refresh(project)
+
+    if payload.source_project_id:
+        dst_dir = _project_storage_dir(project.id)
+        
+        # Copy files from ALL referenced projects (not just the source)
+        # This handles cases where source project references images from other projects
+        for ref_id in referenced_project_ids:
+            ref_dir = _project_storage_dir(ref_id)
+            if ref_dir.exists():
+                shutil.copytree(ref_dir, dst_dir, dirs_exist_ok=True)
+
     return project
 
 

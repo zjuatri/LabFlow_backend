@@ -97,24 +97,47 @@ def cleanup_unused_images(project_id: str, old_code: str, new_code: str) -> None
 
 
 def prepare_typst_compilation(code: str, temp_root: Path) -> str:
-    # Match any image("...") call that references /static/ paths
+    # Match any image("...") call
     # This handles:
     # - #image("/static/...")
+    # - #image("projects/...") (relative path from storage root)
     # - #align(center, image("/static/..."))
-    # - #block(...)[...image("/static/...")...]
-    pattern = r'image\("(/static/[^"]+)"'
+    pattern = r'image\("([^"]+)"'
 
     def repl(m: re.Match[str]) -> str:
         url_path = m.group(1)
 
-        if not url_path.startswith("/static/"):
+        source_path = None
+        if url_path.startswith("/static/"):
+            rel_path = url_path[len("/static/"):]
+            try:
+                source_path = (STORAGE_ROOT / rel_path).resolve()
+            except Exception:
+                pass
+        elif url_path.startswith("projects/") or url_path.startswith("static/projects/"):
+            # Handle relative paths like projects/... or static/projects/...
+            # Remove leading static/ if present to get clean projects/... path
+            clean_path = url_path
+            if clean_path.startswith("static/"):
+                clean_path = clean_path[len("static/"):]
+            
+            try:
+                source_path = (STORAGE_ROOT / clean_path).resolve()
+            except Exception:
+                pass
+
+        if not source_path:
             return m.group(0)
 
-        rel_path = url_path[len("/static/"):]
-        try:
-            source_path = (STORAGE_ROOT / rel_path).resolve()
-        except Exception:
-            return m.group(0)
+        # Calculate destination path in temp dir
+        # We try to preserve the relative structure for clarity, or just use the filename?
+        # Using relative structure is safer to avoid collisions.
+        # If url_path was /static/projects/..., rel_path is projects/...
+        # If url_path was projects/..., let's use it as rel_path
+        if url_path.startswith("/static/"):
+             rel_path = url_path[len("/static/"):]
+        else:
+             rel_path = url_path # projects/...
 
         if not source_path.exists():
             # Try to find a file with mineru_ prefix

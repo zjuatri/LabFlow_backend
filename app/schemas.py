@@ -22,6 +22,7 @@ class TokenResponse(BaseModel):
 class ProjectCreateRequest(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     type: str = "report"
+    source_project_id: str | None = None
 
 
 class ProjectUpdateRequest(BaseModel):
