@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime
-from pydantic import BaseModel, EmailStr, Field
+from datetime import datetime, timezone
+from pydantic import BaseModel, EmailStr, Field, field_serializer
 
 
 class RegisterRequest(BaseModel):
@@ -36,6 +36,19 @@ class ProjectResponse(BaseModel):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+    @field_serializer("created_at", "updated_at")
+    def serialize_datetime(self, dt: datetime) -> str:
+        """Ensure datetime is serialized with UTC timezone info.
+        
+        SQLite doesn't preserve timezone info, so naive datetimes loaded from DB
+        are assumed to be UTC and serialized with 'Z' suffix.
+        """
+        if dt.tzinfo is None:
+            # Naive datetime - assume UTC
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.isoformat().replace("+00:00", "Z")
+
 
 
 class TypstRenderRequest(BaseModel):

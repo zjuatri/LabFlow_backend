@@ -6,7 +6,7 @@ import os
 import random
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 import io
 
@@ -319,7 +319,7 @@ async def ingest_pdf_url(
             "ocr_text_pages": ocr_text_pages,
             "images": saved_images,
             "tables": [],
-            "extracted_at": datetime.utcnow().isoformat() + "Z",
+            "extracted_at": datetime.now(timezone.utc).isoformat(),
         }
         
     except Exception as e:
@@ -627,5 +627,5 @@ async def ingest_pdf(
         "tables": tables,
         "images": saved_images,
         "mineru_debug_url": mineru_debug_url,  # For debugging MinerU access issues
-        "extracted_at": datetime.utcnow().isoformat() + "Z",
+        "extracted_at": datetime.now(timezone.utc).isoformat(),
     }

@@ -6,7 +6,7 @@ import io
 import json
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from starlette.requests import ClientDisconnect
@@ -348,5 +348,5 @@ async def pdf_table_formula_vision(
         "tables": out_tables,
         "rendered_cell_images": rendered_cell_images,
         "diagnostics": diagnostics,
-        "extracted_at": datetime.utcnow().isoformat() + "Z",
+        "extracted_at": datetime.now(timezone.utc).isoformat(),
     }

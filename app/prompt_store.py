@@ -131,7 +131,7 @@ def save_prompts(
 ) -> dict[str, Any]:
     """Save one or more prompts; unspecified fields keep current values."""
 
-    from datetime import datetime
+    from datetime import datetime, timezone
 
     current = load_prompts()
     if ai_prompt is not None:
@@ -141,7 +141,7 @@ def save_prompts(
     if table_cell_ocr_prompt is not None:
         current["table_cell_ocr_prompt"] = table_cell_ocr_prompt
 
-    current["updated_at"] = datetime.utcnow().isoformat() + "Z"
+    current["updated_at"] = datetime.now(timezone.utc).isoformat()
 
     path = _prompts_path()
     payload = {

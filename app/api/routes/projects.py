@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 import shutil
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
@@ -28,7 +28,7 @@ def create_project(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     project = Project(
         user_id=current_user.id,
         title=payload.title,
@@ -51,7 +51,7 @@ def get_project(project_id: str, current_user: User = Depends(get_current_user),
     # Backfill legacy projects that were created with empty typst_code.
     if not (project.typst_code or "").strip():
         project.typst_code = DEFAULT_TYPST_CODE
-        project.updated_at = datetime.utcnow()
+        project.updated_at = datetime.now(timezone.utc)
         db.add(project)
         db.commit()
         db.refresh(project)
@@ -74,7 +74,7 @@ def update_project(
     if payload.typst_code is not None:
         project.typst_code = payload.typst_code
 
-    project.updated_at = datetime.utcnow()
+    project.updated_at = datetime.now(timezone.utc)
     db.add(project)
     db.commit()
     db.refresh(project)
