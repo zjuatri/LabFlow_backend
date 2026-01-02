@@ -34,6 +34,7 @@ class Project(Base):
     user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
 
     title: Mapped[str] = mapped_column(String(200), nullable=False, default="Untitled")
+    type: Mapped[str] = mapped_column(String(32), nullable=False, default="report")
     typst_code: Mapped[str] = mapped_column(Text, nullable=False, default=DEFAULT_TYPST_CODE)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), nullable=False)

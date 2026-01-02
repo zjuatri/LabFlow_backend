@@ -21,16 +21,19 @@ class TokenResponse(BaseModel):
 
 class ProjectCreateRequest(BaseModel):
     title: str = Field(min_length=1, max_length=200)
+    type: str = "report"
 
 
 class ProjectUpdateRequest(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=200)
+    type: str | None = None
     typst_code: str | None = None
 
 
 class ProjectResponse(BaseModel):
     id: str
     title: str
+    type: str
     typst_code: str
     created_at: datetime
     updated_at: datetime

@@ -17,8 +17,15 @@ router = APIRouter()
 
 
 @router.get("/projects", response_model=list[ProjectResponse])
-def list_projects(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    stmt = select(Project).where(Project.user_id == current_user.id).order_by(Project.updated_at.desc())
+def list_projects(
+    type: str | None = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    stmt = select(Project).where(Project.user_id == current_user.id)
+    if type:
+        stmt = stmt.where(Project.type == type)
+    stmt = stmt.order_by(Project.updated_at.desc())
     return list(db.scalars(stmt).all())
 
 
@@ -32,6 +39,7 @@ def create_project(
     project = Project(
         user_id=current_user.id,
         title=payload.title,
+        type=payload.type,
         typst_code=DEFAULT_TYPST_CODE,
         created_at=now,
         updated_at=now,
@@ -71,6 +79,8 @@ def update_project(
 
     if payload.title is not None:
         project.title = payload.title
+    if payload.type is not None:
+        project.type = payload.type
     if payload.typst_code is not None:
         project.typst_code = payload.typst_code
 
