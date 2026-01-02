@@ -6,31 +6,18 @@ from pathlib import Path
 from typing import Any
 
 
-def _prompts_path() -> Path:
-    """Path for editable prompts.
-
-    We keep prompts out of /storage so they can be committed to git, while
-    still supporting older deployments that stored them under STORAGE_ROOT.
-    """
-
-    # Preferred, repo-friendly location.
+def _prompts_dir() -> Path:
+    """Directory for editable prompts."""
     root = Path(__file__).resolve().parent.parent / "prompts"
     root.mkdir(parents=True, exist_ok=True)
-    return root / "ai_prompts.json"
-
-
-def _storage_path() -> Path:
-    # Persist under backend storage so it survives restarts and is easy to mount.
-    root = Path(os.getenv("STORAGE_ROOT") or (Path(__file__).resolve().parent.parent / "storage"))
-    root.mkdir(parents=True, exist_ok=True)
-    return root / "ai_prompts.json"
+    return root
 
 
 DEFAULT_AI_PROMPT_PREFIX = (
     "你是实验报告写作助手。你的输出会被程序解析为 JSON 并写入可视化编辑器。\n\n"
     "硬性要求：\n"
     "1) 只输出 JSON，不要输出解释、Markdown、代码围栏、注释。\n"
-    "2) 输出必须是一个对象：{\"settings\": {...}, \"blocks\": [...]}\n"
+    "2) 输出必须是一个对象：{\"blocks\": [...]}\n"
     "3) blocks 中每个元素必须包含：id(string, 唯一), type, content，并可选 level/language/width/align/caption 等。\n"
     "4) 图片 block 的 content 必须使用 /static/projects/<project_id>/images/<filename>（不要 http 链接；不要带 ?t=）。\n"
     "5) 表格/图表优先使用 tablePayload/chartPayload（对象）避免转义错误。\n"
@@ -74,10 +61,9 @@ DEFAULT_TABLE_CELL_OCR_PROMPT = (
 
 
 def load_prompts() -> dict[str, Any]:
-    """Load all editable prompts with defaults and backward compatibility."""
-
-    path = _prompts_path()
-    legacy_path = _storage_path()
+    """Load all editable prompts from text files."""
+    root = _prompts_dir()
+    
     defaults = {
         "ai_prompt": DEFAULT_AI_PROMPT_TEMPLATE,
         "pdf_page_ocr_prompt": DEFAULT_PDF_PAGE_OCR_PROMPT,
@@ -85,42 +71,40 @@ def load_prompts() -> dict[str, Any]:
         "updated_at": None,
     }
 
-    if not path.exists() and legacy_path.exists():
-        path = legacy_path
+    out = {**defaults}
+    
+    # helper to read file safely
+    def read_file(name: str) -> str | None:
+        p = root / f"{name}.txt"
+        if p.exists():
+            try:
+                return p.read_text(encoding="utf-8")
+            except Exception:
+                pass
+        return None
 
-    if not path.exists():
-        return defaults
+    # Load from text files
+    ai_prompt = read_file("ai_prompt")
+    if ai_prompt is not None:
+        out["ai_prompt"] = ai_prompt
+        
+    pdf_prompt = read_file("pdf_page_ocr_prompt")
+    if pdf_prompt is not None:
+        out["pdf_page_ocr_prompt"] = pdf_prompt
+        
+    table_prompt = read_file("table_cell_ocr_prompt")
+    if table_prompt is not None:
+        out["table_cell_ocr_prompt"] = table_prompt
 
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(data, dict):
-            return defaults
-
-        out = {**defaults}
-
-        # Back-compat keys
-        stored_ai = None
-        if isinstance(data.get("ai_prompt"), str):
-            stored_ai = data.get("ai_prompt")
-        elif isinstance(data.get("ai_prompt_template"), str):
-            stored_ai = data.get("ai_prompt_template")
-
-        if isinstance(stored_ai, str):
-            # Back-compat: older deployments stored only a prefix prompt.
-            if "{{USER_INPUT_JSON}}" in stored_ai or "{{PROJECT_ID}}" in stored_ai:
-                out["ai_prompt"] = stored_ai
-            else:
-                out["ai_prompt"] = stored_ai.rstrip() + "\n\n" + DEFAULT_AI_PROMPT_TEMPLATE[len(DEFAULT_AI_PROMPT_PREFIX) :]
-
-        if isinstance(data.get("pdf_page_ocr_prompt"), str):
-            out["pdf_page_ocr_prompt"] = data["pdf_page_ocr_prompt"]
-        if isinstance(data.get("table_cell_ocr_prompt"), str):
-            out["table_cell_ocr_prompt"] = data["table_cell_ocr_prompt"]
-
-        out["updated_at"] = data.get("updated_at")
-        return out
-    except Exception:
-        return defaults
+    # Determine "updated_at" from the modification time of ai_prompt.txt if possible
+    # This is a loose approximation but suffices for cache busting if needed.
+    ai_path = root / "ai_prompt.txt"
+    if ai_path.exists():
+        from datetime import datetime, timezone
+        ts = ai_path.stat().st_mtime
+        out["updated_at"] = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+        
+    return out
 
 
 def save_prompts(
@@ -129,29 +113,20 @@ def save_prompts(
     pdf_page_ocr_prompt: str | None = None,
     table_cell_ocr_prompt: str | None = None,
 ) -> dict[str, Any]:
-    """Save one or more prompts; unspecified fields keep current values."""
+    """Save one or more prompts to text files."""
 
-    from datetime import datetime, timezone
-
-    current = load_prompts()
+    root = _prompts_dir()
+    
     if ai_prompt is not None:
-        current["ai_prompt"] = ai_prompt
+        (root / "ai_prompt.txt").write_text(ai_prompt, encoding="utf-8")
+        
     if pdf_page_ocr_prompt is not None:
-        current["pdf_page_ocr_prompt"] = pdf_page_ocr_prompt
+        (root / "pdf_page_ocr_prompt.txt").write_text(pdf_page_ocr_prompt, encoding="utf-8")
+        
     if table_cell_ocr_prompt is not None:
-        current["table_cell_ocr_prompt"] = table_cell_ocr_prompt
+        (root / "table_cell_ocr_prompt.txt").write_text(table_cell_ocr_prompt, encoding="utf-8")
 
-    current["updated_at"] = datetime.now(timezone.utc).isoformat()
-
-    path = _prompts_path()
-    payload = {
-        "ai_prompt": current["ai_prompt"],
-        "pdf_page_ocr_prompt": current["pdf_page_ocr_prompt"],
-        "table_cell_ocr_prompt": current["table_cell_ocr_prompt"],
-        "updated_at": current["updated_at"],
-    }
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    return payload
+    return load_prompts()
 
 
 def load_prompt() -> dict[str, Any]:
