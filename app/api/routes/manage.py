@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
-from ...prompt_store import load_prompt, load_prompts, save_prompt, save_prompts
+from ...prompt_store import load_assistant_prompt, load_prompt, load_prompts, save_prompt, save_prompts
 from ...security import require_admin, get_current_user
 
 router = APIRouter()
@@ -20,6 +20,7 @@ class PromptUpdateRequest(BaseModel):
 
 class PromptsResponse(BaseModel):
     ai_prompt: str
+    ai_assistant_prompt: str
     pdf_page_ocr_prompt: str
     table_cell_ocr_prompt: str
     updated_at: str | None = None
@@ -27,6 +28,7 @@ class PromptsResponse(BaseModel):
 
 class PromptsUpdateRequest(BaseModel):
     ai_prompt: str | None = None
+    ai_assistant_prompt: str | None = None
     pdf_page_ocr_prompt: str | None = None
     table_cell_ocr_prompt: str | None = None
 
@@ -34,6 +36,12 @@ class PromptsUpdateRequest(BaseModel):
 @router.get("/manage/prompt", response_model=PromptResponse)
 def get_prompt(current_user=Depends(get_current_user)):
     data = load_prompt()
+    return PromptResponse(ai_prompt=data["ai_prompt"], updated_at=data.get("updated_at"))
+
+
+@router.get("/manage/assistant-prompt", response_model=PromptResponse)
+def get_assistant_prompt(current_user=Depends(get_current_user)):
+    data = load_assistant_prompt()
     return PromptResponse(ai_prompt=data["ai_prompt"], updated_at=data.get("updated_at"))
 
 
@@ -48,6 +56,7 @@ def get_prompts(_admin=Depends(require_admin)):
     data = load_prompts()
     return PromptsResponse(
         ai_prompt=data["ai_prompt"],
+        ai_assistant_prompt=data["ai_assistant_prompt"],
         pdf_page_ocr_prompt=data["pdf_page_ocr_prompt"],
         table_cell_ocr_prompt=data["table_cell_ocr_prompt"],
         updated_at=data.get("updated_at"),
@@ -58,11 +67,13 @@ def get_prompts(_admin=Depends(require_admin)):
 def update_prompts(payload: PromptsUpdateRequest, _admin=Depends(require_admin)):
     data = save_prompts(
         ai_prompt=payload.ai_prompt,
+        ai_assistant_prompt=payload.ai_assistant_prompt,
         pdf_page_ocr_prompt=payload.pdf_page_ocr_prompt,
         table_cell_ocr_prompt=payload.table_cell_ocr_prompt,
     )
     return PromptsResponse(
         ai_prompt=data["ai_prompt"],
+        ai_assistant_prompt=data["ai_assistant_prompt"],
         pdf_page_ocr_prompt=data["pdf_page_ocr_prompt"],
         table_cell_ocr_prompt=data["table_cell_ocr_prompt"],
         updated_at=data.get("updated_at"),
