@@ -29,8 +29,10 @@ async def upload_image(project_id: str, file: UploadFile = File(...)):
         images_dir.mkdir(parents=True, exist_ok=True)
 
         ext = forced_ext or (file.filename.split(".")[-1].lower() if file.filename and "." in file.filename else "png")
+        import uuid
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"{timestamp}.{ext}"
+        random_suffix = uuid.uuid4().hex[:6]
+        filename = f"{timestamp}_{random_suffix}.{ext}"
         dest_path = images_dir / filename
 
         dest_path.write_bytes(compressed)
