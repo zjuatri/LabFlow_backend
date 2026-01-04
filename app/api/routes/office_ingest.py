@@ -6,7 +6,7 @@ import shutil
 
 router = APIRouter()
 
-@router.post("/convert/office-to-markdown")
+@router.post("/projects/convert/office-to-markdown")
 async def convert_office_to_markdown(file: UploadFile = File(...)):
     """
     Convert uploaded Office file (PPTX, DOCX) to Markdown using MarkItDown.
