@@ -10,6 +10,7 @@ from .pdf_ingest import router as pdf_ingest_router
 from .pdf_table_formula_vision import router as pdf_table_formula_vision_router
 from .pdf_formula_vision import router as pdf_formula_vision_router
 from .images_summary import router as images_summary_router
+from .docs import router as docs_router
 
 router = APIRouter()
 
@@ -24,3 +25,4 @@ router.include_router(pdf_ingest_router)
 router.include_router(pdf_table_formula_vision_router)
 router.include_router(pdf_formula_vision_router)
 router.include_router(images_summary_router)
+router.include_router(docs_router)

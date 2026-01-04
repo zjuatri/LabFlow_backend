@@ -90,3 +90,33 @@ class DeepSeekChatResponse(BaseModel):
     model: str
     thought: str | None = None
     usage: dict | None = None
+
+
+class DocumentBase(BaseModel):
+    slug: str = Field(min_length=1, max_length=200)
+    title: str = Field(min_length=1, max_length=200)
+    content: str = ""
+    is_published: bool = True
+
+class DocumentCreate(DocumentBase):
+    pass
+
+class DocumentUpdate(BaseModel):
+    slug: str | None = Field(default=None, min_length=1, max_length=200)
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    content: str | None = None
+    is_published: bool | None = None
+
+class DocumentResponse(DocumentBase):
+    id: str
+    created_at: datetime
+    updated_at: datetime
+    
+    model_config = {"from_attributes": True}
+
+    @field_serializer("created_at", "updated_at")
+    def serialize_datetime(self, dt: datetime) -> str:
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.isoformat().replace("+00:00", "Z")
+
