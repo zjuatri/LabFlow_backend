@@ -14,6 +14,9 @@ RUN apt-get update \
 	gcc \
 	pkg-config \
 	default-libmysqlclient-dev \
+	libreoffice-common \
+	libreoffice-writer \
+	libreoffice-impress \
 	&& rm -rf /var/lib/apt/lists/*
 
 # Install Typst CLI

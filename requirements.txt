@@ -18,4 +18,5 @@ requests
 pdfplumber
 pypdfium2
 pypdf
+markitdown[docx,pptx]
 requests
