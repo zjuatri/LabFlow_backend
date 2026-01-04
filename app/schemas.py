@@ -120,3 +120,7 @@ class DocumentResponse(DocumentBase):
             dt = dt.replace(tzinfo=timezone.utc)
         return dt.isoformat().replace("+00:00", "Z")
 
+
+class SidebarStructureUpdate(BaseModel):
+    structure: list[dict]
+

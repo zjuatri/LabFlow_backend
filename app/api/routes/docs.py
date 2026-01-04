@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from ...db import get_db
 from ...models import Document, User, SystemConfig
-from ...schemas import DocumentCreate, DocumentResponse, DocumentUpdate
+from ...schemas import DocumentCreate, DocumentResponse, DocumentUpdate, SidebarStructureUpdate
 from ...security import get_current_user
 
 router = APIRouter()
@@ -31,10 +31,11 @@ def get_sidebar_structure(db: Session = Depends(get_db)):
 
 @router.put("/docs/structure")
 def update_sidebar_structure(
-    structure: list, 
+    payload: SidebarStructureUpdate, 
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+    structure = payload.structure
     import json
     config = db.scalar(select(SystemConfig).where(SystemConfig.key == SIDEBAR_CONFIG_KEY))
     if not config:
